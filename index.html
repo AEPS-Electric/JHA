@@ -186,8 +186,8 @@ canvas.sig-canvas{border-bottom:1px solid #000;width:100%;height:56px;cursor:cro
     </div>
     <div id="modal-od-row" style="margin-bottom:12px">
       <div id="modal-od-status" style="font-size:12px;color:#6b7280;font-family:'Segoe UI',Arial,sans-serif;margin-bottom:8px"></div>
-      <label class="modal-label">SharePoint folder path (e.g. HSSE/Completed)</label>
-      <input class="modal-input" type="text" id="od-folder" value="HSSE/Completed" style="margin-bottom:8px">
+      <label class="modal-label">SharePoint folder path (e.g. JHA/Completed)</label>
+      <input class="modal-input" type="text" id="od-folder" value="JHA/Completed" style="margin-bottom:8px">
     </div>
     <label class="modal-label">Also send email summary to:</label>
     <input class="modal-input" type="email" id="sender-email" placeholder="safety@aeps-electric.com" value="safety@aeps-electric.com">
@@ -240,7 +240,7 @@ canvas.sig-canvas{border-bottom:1px solid #000;width:100%;height:56px;cursor:cro
       <td style="font-size:10px">On Site:&nbsp;<input type="checkbox" id="onsite">&nbsp;&nbsp;Off Site:&nbsp;<input type="checkbox" id="offsite"></td>
     </tr>
     <tr>
-      <td colspan="2"><strong>JP Prepared By:</strong> <select id="prepared-by" style="width:68%;border:1px solid #ccc;border-radius:3px;background:#fff;font-size:10px;font-family:'Times New Roman',Times,serif;padding:2px;outline:none;color:#000" onchange="syncPreparer()"><option value="">— load data file —</option></select></td>
+      <td colspan="2"><strong>JP Prepared By:</strong> <select id="prepared-by" style="width:68%;border:1px solid #ccc;border-radius:3px;background:#fff;font-size:10px;font-family:'Times New Roman',Times,serif;padding:2px;outline:none;color:#000" onchange="syncPreparer()"><option value="">— sign in to load —</option></select></td>
       <td style="vertical-align:top"><strong>Project Name:</strong><br><input type="text" id="work-location" placeholder="Project name" style="font-size:13px;font-weight:500;width:100%;border:none;border-bottom:1px solid #888;outline:none;background:transparent;padding:2px 0;font-family:'Times New Roman',Times,serif"></td>
     </tr>
     <tr>
@@ -410,15 +410,18 @@ canvas.sig-canvas{border-bottom:1px solid #000;width:100%;height:56px;cursor:cro
 <script>
 // ── CONFIG (edit these values, not the data) ────────────────────────────────
 const CONFIG = {
-  // SharePoint site that holds the data workbook and the saved forms
-  sharePointSite: 'absolutelyenergizedsolar.sharepoint.com:/Shared%20Drive',
-  // Data workbook, path relative to the site's "Shared Documents" library
+  // SharePoint site: 'root' = the tenant's root site (absolutelyenergizedsolar.sharepoint.com).
+  // For a sub-site use 'absolutelyenergizedsolar.sharepoint.com:/sites/SiteName'. '' = signed-in user's OneDrive.
+  sharePointSite: 'root',
+  // Document library (display name) inside that site. '' = the site's default library.
+  library: 'Shared Drive',
+  // Data workbook, path relative to the library root
   excel: {
     path: 'JHA/AEPS_HSSE_Data.xlsx',
     sheets: {tasks:'Tasks', hazards:'Hazards', personnel:'Personnel', settings:'Settings'}
   },
   dataUrl: 'JHA-data.json',        // optional backup copy hosted beside this page; '' to disable
-  defaultFolder: 'HSSE/Completed', // where submitted forms are saved
+  defaultFolder: 'JHA/Completed',  // where submitted forms are saved (relative to the library)
   tokenCache: 'localStorage'       // 'sessionStorage' = sign in every time the tab closes
 };
 let TASKS = [], HAZARDS = [], PERSONNEL = [], SETTINGS = {};
@@ -451,10 +454,23 @@ function loadCachedData(){
 
 // ── EXCEL (SharePoint) DATA SOURCE ───────────────────────────────────────────
 function encodePath(p){ return p.replace(/^\/+|\/+$/g,'').split('/').map(encodeURIComponent).join('/'); }
-function driveBase(){
-  return CONFIG.sharePointSite
-    ? `https://graph.microsoft.com/v1.0/sites/${CONFIG.sharePointSite}:/drive`
-    : 'https://graph.microsoft.com/v1.0/me/drive';
+const GRAPH = 'https://graph.microsoft.com/v1.0';
+let _driveBase = null;
+function siteUrl(suffix){
+  const s = CONFIG.sharePointSite;
+  return GRAPH + '/sites/' + s + (s.includes(':') ? ':' : '') + suffix;
+}
+async function driveBase(){
+  if(_driveBase) return _driveBase;
+  if(!CONFIG.sharePointSite) return (_driveBase = GRAPH + '/me/drive');
+  if(!CONFIG.library) return (_driveBase = siteUrl('/drive'));
+  const j = await graphGet(siteUrl('/drives?$select=id,name,webUrl'));
+  const want = CONFIG.library.trim().toLowerCase();
+  const list = j.value || [];
+  const d = list.find(x => (x.name||'').toLowerCase() === want ||
+    decodeURIComponent(x.webUrl||'').toLowerCase().endsWith('/' + want));
+  if(!d) throw new Error('Library "' + CONFIG.library + '" not found on the site (libraries found: ' + (list.map(x => x.name).join(', ') || 'none') + ')');
+  return (_driveBase = GRAPH + '/drives/' + d.id);
 }
 async function graphGet(url){
   const r = await fetch(url, {headers:{Authorization:'Bearer '+graphToken}});
@@ -474,7 +490,7 @@ const xRisk = v => { const s = xStr(v).toLowerCase(); return s ? s[0].toUpperCas
 
 async function loadFromExcel(){
   const x = CONFIG.excel;
-  const wb = `${driveBase()}/root:/${encodePath(x.path)}:/workbook/worksheets`;
+  const wb = `${await driveBase()}/root:/${encodePath(x.path)}:/workbook/worksheets`;
   const get = async name => (await graphGet(`${wb}('${encodeURIComponent(name)}')/usedRange(valuesOnly=true)?$select=values`)).values;
   const [t, h, p, s] = await Promise.all([get(x.sheets.tasks), get(x.sheets.hazards), get(x.sheets.personnel), get(x.sheets.settings)]);
   const settings = {};
@@ -588,7 +604,7 @@ function onPersonnelChange(selId,phoneId){
 // ── CREW SIGNATURE ROWS ───────────────────────────────────────────────────────
 function crewMemberOptions(){
   const members=PERSONNEL.filter(p=>(p.role==='Crew Member'||p.role==='Crew Leader')&&p.active);
-  if(!members.length) return '<option value="">— load data file —</option>';
+  if(!members.length) return '<option value="">— sign in to load —</option>';
   return '<option value="">— select —</option>'+members.map(p=>`<option value="${escQ(p.name)}">${p.name}</option>`).join('');
 }
 
@@ -792,7 +808,7 @@ function initSig(id,sigH){
 }
 function clearSig(id){const c=document.getElementById(id);if(c)c.getContext('2d').clearRect(0,0,c.width,c.height);}
 
-// ── MICROSOFT GRAPH / ONEDRIVE ────────────────────────────────────────────────
+// ── MICROSOFT GRAPH / SHAREPOINT ────────────────────────────────────────────────
 // Replace CLIENT_ID below with your Azure app registration client ID
 const MSAL_CLIENT_ID = 'f330cd8a-3319-4222-944e-2e3ba1a69d3a';
 const MSAL_AUTHORITY  = 'https://login.microsoftonline.com/common';
@@ -871,10 +887,7 @@ async function saveToSharePoint(htmlContent, filename, folderPath){
   try {
     // Ensure folder path exists by creating upload path
     const safePath = folderPath.replace(/^\/+|\/+$/g,'').split('/').map(encodeURIComponent).join('/');
-    const driveBase = CONFIG.sharePointSite
-      ? `https://graph.microsoft.com/v1.0/sites/${CONFIG.sharePointSite}:/drive`
-      : 'https://graph.microsoft.com/v1.0/me/drive';
-    const uploadUrl = `${driveBase}/root:/${safePath}/${encodeURIComponent(filename)}:/content`;
+    const uploadUrl = `${await driveBase()}/root:/${safePath}/${encodeURIComponent(filename)}:/content`;
     const blob = new Blob([htmlContent], {type:'text/html'});
     const res = await fetch(uploadUrl, {
       method:'PUT',
@@ -907,7 +920,7 @@ function buildFilename(){
   return `${project}_${date}_${t}.html`;
 }
 
-// ── REPORT (what gets saved to SharePoint/SharePoint) ─────────────────────────
+// ── REPORT (what gets saved to SharePoint) ─────────────────────────
 function buildReportHtml(){
   const v = id => { const e = document.getElementById(id); return e ? (e.value || '') : ''; };
   const ck = id => { const e = document.getElementById(id); return e && e.checked ? '☑' : '☐'; };
@@ -963,7 +976,7 @@ async function doSubmit(){
   const date     = document.getElementById('job-date').value||'—';
   const prepBy   = document.getElementById('prepared-by').value||'—';
   const sup      = document.getElementById('approved-sup').value||'—';
-  const folder   = (document.getElementById('od-folder').value||'HSSE/Completed').trim();
+  const folder   = (document.getElementById('od-folder').value||CONFIG.defaultFolder).trim();
   const filename = buildFilename();
 
   // Build email body
